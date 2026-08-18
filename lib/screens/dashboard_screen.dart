@@ -1,10 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'dart:convert';
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 import '../helpers.dart';
 import 'clients_screen.dart';
 import 'daily_sales_screen.dart';
 import 'access_log_screen.dart';
 import 'inventory_screen.dart';
+import 'batidos_screen.dart';
 import 'reports_screen.dart';
 import 'user_management_screen.dart';
 
@@ -19,17 +24,178 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   int _selectedIndex = 0;
+  String? _globalSelectedClientId;
+  Timer? _ratesTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _actualizarTasasBCV();
+    _ratesTimer = Timer.periodic(const Duration(hours: 1), (_) => _actualizarTasasBCV());
+  }
+
+  @override
+  void dispose() {
+    _ratesTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _actualizarTasasBCV() async {
+    try {
+      final client = HttpClient();
+      final reqUsd = await client.getUrl(Uri.parse('https://ve.dolarapi.com/v1/dolares/oficial'));
+      final resUsd = await reqUsd.close();
+      final strUsd = await resUsd.transform(utf8.decoder).join();
+      final jsonUsd = jsonDecode(strUsd);
+      
+      final reqEur = await client.getUrl(Uri.parse('https://ve.dolarapi.com/v1/euros/oficial'));
+      final resEur = await reqEur.close();
+      final strEur = await resEur.transform(utf8.decoder).join();
+      final jsonEur = jsonDecode(strEur);
+
+      var configBox = Hive.box('configBox');
+      if(jsonUsd['promedio'] != null) await configBox.put('tasa_usd', (jsonUsd['promedio'] as num).toDouble());
+      if(jsonEur['promedio'] != null) await configBox.put('tasa_eur', (jsonEur['promedio'] as num).toDouble());
+    } catch (e) {
+      debugPrint("Error obteniendo tasas BCV: $e");
+    }
+  }
+
+  Widget _buildTopStatsBar(String boxName) {
+    return ValueListenableBuilder(
+      valueListenable: Hive.box(boxName).listenable(),
+      builder: (context, Box box, _) {
+        int total = 0, activos = 0, vencidos = 0, cortesia = 0;
+        final hoy = DateTime.now();
+        final hoyDate = DateTime(hoy.year, hoy.month, hoy.day);
+
+        for (var value in box.values) {
+          final c = Map<String, dynamic>.from(value as Map);
+          total++;
+          bool esCortesia = c['cortesia'] == true || c['tipo'] == 'Cortesía' || c['estado'] == 'Cortesía';
+          if (esCortesia) {
+            cortesia++;
+          } else {
+            String fVencimiento = c['fechaVencimiento']?.toString() ?? '';
+            if (fVencimiento.isNotEmpty && fVencimiento.contains('/')) {
+              try {
+                var parts = fVencimiento.split('/');
+                DateTime vDate = DateTime(int.parse(parts[2]), int.parse(parts[1]), int.parse(parts[0]));
+                if (vDate.isBefore(hoyDate)) vencidos++;
+                else activos++;
+              } catch (e) { vencidos++; }
+            } else {
+              vencidos++;
+            }
+          }
+        }
+
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+          decoration: BoxDecoration(color: Colors.blue.shade800, boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 4)]),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _StatItem(title: 'TOTAL CLIENTES', count: total, color: Colors.white),
+              _StatItem(title: 'ACTIVOS', count: activos, color: Colors.greenAccent),
+              _StatItem(title: 'VENCIDOS', count: vencidos, color: Colors.redAccent),
+              _StatItem(title: 'CORTESÍAS', count: cortesia, color: Colors.orangeAccent),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildLiveFeedPanel(String boxAccesosNombre, String boxClientesNombre) {
+    return Container(
+      width: 260,
+      color: Colors.blueGrey.shade50,
+      child: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            color: Colors.blue.shade900,
+            child: const Text('ENTRADAS EN VIVO', textAlign: TextAlign.center, style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1)),
+          ),
+          Expanded(
+            child: ValueListenableBuilder(
+              valueListenable: Hive.box(boxAccesosNombre).listenable(),
+              builder: (context, Box boxAccesos, _) {
+                final hoy = DateTime.now();
+                final fechaHoy = "${hoy.day.toString().padLeft(2,'0')}/${hoy.month.toString().padLeft(2,'0')}/${hoy.year}";
+
+                final listaHoy = boxAccesos.values
+                    .map((e) => Map<String, dynamic>.from(e as Map))
+                    .where((a) => a['fecha'] == fechaHoy)
+                    .toList()
+                    .reversed
+                    .toList();
+
+                if (listaHoy.isEmpty) return const Center(child: Text('Esperando ingresos...', style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic, fontSize: 12)));
+
+                return ListView.builder(
+                  itemCount: listaHoy.length,
+                  itemBuilder: (context, index) {
+                    final acceso = listaHoy[index];
+                    final cliente = Hive.box(boxClientesNombre).get(acceso['clienteId']);
+                    
+                    Uint8List? img;
+                    String nombre = acceso['nombre'] ?? 'Desconocido';
+                    
+                    if (cliente != null) {
+                      final c = Map<String, dynamic>.from(cliente as Map);
+                      String? b64 = c['fotoBase64'];
+                      if (b64 != null && b64.isNotEmpty) {
+                        try {
+                          img = base64Decode(b64.contains(',') ? b64.split(',').last.replaceAll(RegExp(r'\s+'), '') : b64.replaceAll(RegExp(r'\s+'), ''));
+                        } catch(e) { }
+                      }
+                      nombre = "${c['nombre']} ${c['apellido'] ?? ''}";
+                    }
+
+                    bool aprobado = acceso['estado'] == 'ACCESO PERMITIDO';
+
+                    return Card(
+                      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      shape: RoundedRectangleBorder(side: BorderSide(color: aprobado ? Colors.green.shade400 : Colors.red.shade400, width: 2), borderRadius: BorderRadius.circular(8)),
+                      child: ListTile(
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        leading: CircleAvatar(
+                          radius: 18,
+                          backgroundColor: Colors.grey.shade300,
+                          backgroundImage: img != null ? MemoryImage(img) : null,
+                          child: img == null ? const Icon(Icons.person, color: Colors.white, size: 20) : null,
+                        ),
+                        title: Text(nombre, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11), overflow: TextOverflow.ellipsis),
+                        subtitle: Text(acceso['hora'] ?? '', style: TextStyle(color: Colors.blue.shade800, fontSize: 10, fontWeight: FontWeight.bold)),
+                        trailing: Icon(aprobado ? Icons.check_circle : Icons.cancel, color: aprobado ? Colors.green : Colors.red, size: 18),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     String sedeActual = obtenerSedeActual().toUpperCase();
+    String boxClientesNombre = obtenerNombreBoxSede('clientsBox');
+    String boxAccesosNombre = obtenerNombreBoxSede('accesosBox');
 
     final List<Widget> pantallas = [
       const _ContenidoDashboard(),
-      ClientsScreen(usuarioActual: widget.usuarioActual),
+      ClientsScreen(usuarioActual: widget.usuarioActual, clienteIdSeleccionado: _globalSelectedClientId), 
       DailySalesScreen(usuarioActual: widget.usuarioActual),
       AccessLogScreen(usuarioActual: widget.usuarioActual),
       InventoryScreen(usuarioActual: widget.usuarioActual),
+      BatidosScreen(usuarioActual: widget.usuarioActual),
       ReportsScreen(usuarioActual: widget.usuarioActual),
       if (widget.usuarioActual['rol'] == 'Administrador')
         UserManagementScreen(usuarioActual: widget.usuarioActual),
@@ -37,66 +203,135 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('GymAdmin - Sede: $sedeActual'),
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
+        elevation: 0,
+        title: Row(
+          children: [
+            Text('Gala Gym - Sede: $sedeActual', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            const SizedBox(width: 30),
+            
+            Expanded(
+              child: Center(
+                child: Container(
+                  width: 450,
+                  height: 40,
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8)),
+                  child: Autocomplete<Map<String, dynamic>>(
+                    displayStringForOption: (option) => "#${option['numero']} - ${option['nombre']} ${option['apellido'] ?? ''}",
+                    optionsBuilder: (TextEditingValue textEditingValue) {
+                      if (textEditingValue.text.isEmpty) return const Iterable<Map<String, dynamic>>.empty();
+                      var box = Hive.box(boxClientesNombre);
+                      var keys = box.keys.toList();
+                      
+                      return keys.map((k) {
+                        var c = Map<String, dynamic>.from(box.get(k) as Map);
+                        c['id'] = k; 
+                        c['numero'] = keys.indexOf(k) + 1; 
+                        return c;
+                      }).where((c) {
+                        String busqueda = textEditingValue.text.toLowerCase();
+                        String nom = "${c['nombre']} ${c['apellido'] ?? ''}".toLowerCase();
+                        String ced = (c['cedula'] ?? '').toString().toLowerCase();
+                        String numStr = c['numero'].toString();
+                        return nom.contains(busqueda) || ced.contains(busqueda) || numStr == busqueda;
+                      });
+                    },
+                    onSelected: (Map<String, dynamic> selection) {
+                      setState(() {
+                        _globalSelectedClientId = selection['id'].toString();
+                        _selectedIndex = 1; 
+                      });
+                    },
+                    fieldViewBuilder: (context, controller, focusNode, onEditingComplete) {
+                      return TextField(
+                        controller: controller,
+                        focusNode: focusNode,
+                        onEditingComplete: onEditingComplete,
+                        style: const TextStyle(color: Colors.black87),
+                        decoration: const InputDecoration(
+                          hintText: 'Buscar por Nombre, Cédula o Número de Cliente...',
+                          prefixIcon: Icon(Icons.search, color: Colors.blue),
+                          border: InputBorder.none,
+                          contentPadding: EdgeInsets.symmetric(vertical: 10),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
         actions: [
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16.0),
-            child: Center(
-              child: Text(
-                'Rol: ${widget.usuarioActual['rol']}',
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-            ),
+            child: Center(child: Text('Rol: ${widget.usuarioActual['rol']}', style: const TextStyle(fontWeight: FontWeight.bold))),
           ),
         ],
       ),
-      body: Row(
-        children: [
-          NavigationRail(
-            selectedIndex: _selectedIndex,
-            onDestinationSelected: (int index) {
-              setState(() {
-                _selectedIndex = index;
-              });
-            },
-            labelType: NavigationRailLabelType.all,
-            destinations: [
-              const NavigationRailDestination(
-                icon: Icon(Icons.dashboard),
-                label: Text('Inicio'),
-              ),
-              const NavigationRailDestination(
-                icon: Icon(Icons.people),
-                label: Text('Clientes'),
-              ),
-              const NavigationRailDestination(
-                icon: Icon(Icons.point_of_sale),
-                label: Text('Ventas'),
-              ),
-              const NavigationRailDestination(
-                icon: Icon(Icons.fingerprint),
-                label: Text('Accesos'),
-              ),
-              const NavigationRailDestination(
-                icon: Icon(Icons.inventory),
-                label: Text('Inventario'),
-              ),
-              const NavigationRailDestination(
-                icon: Icon(Icons.bar_chart),
-                label: Text('Reportes'),
-              ),
-              if (widget.usuarioActual['rol'] == 'Administrador')
-                const NavigationRailDestination(
-                  icon: Icon(Icons.admin_panel_settings),
-                  label: Text('Usuarios'),
+      
+      floatingActionButton: ValueListenableBuilder(
+        valueListenable: Hive.box('configBox').listenable(),
+        builder: (context, Box box, _) {
+          double usd = box.get('tasa_usd', defaultValue: 0.0);
+          double eur = box.get('tasa_eur', defaultValue: 0.0);
+          return Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 10, offset: Offset(0, 4))],
+              border: Border.all(color: Colors.blue.shade900, width: 2),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.account_balance, color: Colors.blue.shade900, size: 30),
+                const SizedBox(width: 12),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('TASA OFICIAL BCV', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.grey)),
+                    Text('USD: Bs. ${usd.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 13)),
+                    Text('EUR: Bs. ${eur.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue, fontSize: 13)),
+                  ],
                 ),
-            ],
-          ),
-          const VerticalDivider(thickness: 1, width: 1),
+              ],
+            ),
+          );
+        },
+      ),
+
+      body: Column(
+        children: [
+          _buildTopStatsBar(boxClientesNombre),
           Expanded(
-            child: pantallas[_selectedIndex],
+            child: Row(
+              children: [
+                NavigationRail(
+                  selectedIndex: _selectedIndex,
+                  onDestinationSelected: (int index) => setState(() { _selectedIndex = index; _globalSelectedClientId = null; }),
+                  labelType: NavigationRailLabelType.all,
+                  destinations: [
+                    const NavigationRailDestination(icon: Icon(Icons.dashboard), label: Text('Inicio')),
+                    const NavigationRailDestination(icon: Icon(Icons.people), label: Text('Clientes')),
+                    const NavigationRailDestination(icon: Icon(Icons.point_of_sale), label: Text('Ventas')),
+                    const NavigationRailDestination(icon: Icon(Icons.fingerprint), label: Text('Accesos')),
+                    const NavigationRailDestination(icon: Icon(Icons.inventory), label: Text('Productos/Membresías')), // <-- CAMBIO AQUÍ
+                    const NavigationRailDestination(icon: Icon(Icons.local_cafe), label: Text('Batidos')), 
+                    const NavigationRailDestination(icon: Icon(Icons.bar_chart), label: Text('Reportes')),
+                    if (widget.usuarioActual['rol'] == 'Administrador')
+                      const NavigationRailDestination(icon: Icon(Icons.admin_panel_settings), label: Text('Usuarios')),
+                  ],
+                ),
+                const VerticalDivider(thickness: 1, width: 1),
+                Expanded(child: pantallas[_selectedIndex]),
+                const VerticalDivider(thickness: 1, width: 1),
+                _buildLiveFeedPanel(boxAccesosNombre, boxClientesNombre),
+              ],
+            ),
           ),
         ],
       ),
@@ -104,24 +339,37 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 }
 
+class _StatItem extends StatelessWidget {
+  final String title;
+  final int count;
+  final Color color;
+  const _StatItem({required this.title, required this.count, required this.color});
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(title, style: TextStyle(color: color.withValues(alpha: 0.8), fontSize: 12, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 4),
+        Text(count.toString(), style: TextStyle(color: color, fontSize: 24, fontWeight: FontWeight.bold)),
+      ],
+    );
+  }
+}
+
 class _ContenidoDashboard extends StatelessWidget {
   const _ContenidoDashboard();
-
   @override
   Widget build(BuildContext context) {
     String boxClientesNombre = obtenerNombreBoxSede('clientsBox');
     String boxVentasNombre = obtenerNombreBoxSede('ventasBox');
     String boxAccesosNombre = obtenerNombreBoxSede('accesosBox');
-
     return Padding(
       padding: const EdgeInsets.all(24.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Panel General de Control',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-          ),
+          const Text('Panel General de Control', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
           const SizedBox(height: 20),
           Expanded(
             child: GridView.count(
@@ -130,73 +378,22 @@ class _ContenidoDashboard extends StatelessWidget {
               mainAxisSpacing: 16,
               childAspectRatio: 1.5,
               children: [
-                ValueListenableBuilder(
-                  valueListenable: Hive.box(boxClientesNombre).listenable(),
-                  builder: (context, Box box, _) {
-                    return Card(
-                      elevation: 3,
-                      child: Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Icon(Icons.people, size: 40, color: Colors.blue),
-                            const SizedBox(height: 8),
-                            const Text('Clientes Registrados', style: TextStyle(fontSize: 16)),
-                            const SizedBox(height: 4),
-                            Text('${box.length}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
-                ValueListenableBuilder(
-                  valueListenable: Hive.box(boxVentasNombre).listenable(),
-                  builder: (context, Box box, _) {
-                    return Card(
-                      elevation: 3,
-                      child: Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Icon(Icons.point_of_sale, size: 40, color: Colors.green),
-                            const SizedBox(height: 8),
-                            const Text('Ventas Realizadas', style: TextStyle(fontSize: 16)),
-                            const SizedBox(height: 4),
-                            Text('${box.length}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
-                ValueListenableBuilder(
-                  valueListenable: Hive.box(boxAccesosNombre).listenable(),
-                  builder: (context, Box box, _) {
-                    return Card(
-                      elevation: 3,
-                      child: Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Icon(Icons.fingerprint, size: 40, color: Colors.orange),
-                            const SizedBox(height: 8),
-                            const Text('Accesos Registrados', style: TextStyle(fontSize: 16)),
-                            const SizedBox(height: 4),
-                            Text('${box.length}', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
-                ),
+                ValueListenableBuilder(valueListenable: Hive.box(boxClientesNombre).listenable(), builder: (c, Box box, _) => _buildDashCard('Clientes Registrados', box.length.toString(), Icons.people, Colors.blue)),
+                ValueListenableBuilder(valueListenable: Hive.box(boxVentasNombre).listenable(), builder: (c, Box box, _) => _buildDashCard('Ventas Realizadas', box.length.toString(), Icons.point_of_sale, Colors.green)),
+                ValueListenableBuilder(valueListenable: Hive.box(boxAccesosNombre).listenable(), builder: (c, Box box, _) => _buildDashCard('Accesos Registrados', box.length.toString(), Icons.fingerprint, Colors.orange)),
               ],
             ),
           ),
         ],
+      ),
+    );
+  }
+  Widget _buildDashCard(String title, String count, IconData icon, Color color) {
+    return Card(
+      elevation: 3,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [Icon(icon, size: 40, color: color), const SizedBox(height: 8), Text(title, style: const TextStyle(fontSize: 16)), const SizedBox(height: 4), Text(count, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold))],
       ),
     );
   }

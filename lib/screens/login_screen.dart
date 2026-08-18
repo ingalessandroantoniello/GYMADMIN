@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'dashboard_screen.dart';
-import '../helpers.dart'; // Importante para poder obtener los nombres de las cajas por sede
+import '../helpers.dart'; 
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -63,7 +63,6 @@ class _LoginScreenState extends State<LoginScreen> {
             return AlertDialog(
               title: const Text('Seleccione la Sede de Trabajo'),
               content: DropdownButtonFormField<String>(
-                // Se cambia 'value' a 'initialValue' para resolver la advertencia azul del linter
                 initialValue: sedeSeleccionada,
                 decoration: const InputDecoration(border: OutlineInputBorder()),
                 items: sedesPermitidas.map((sede) {
@@ -82,21 +81,22 @@ class _LoginScreenState extends State<LoginScreen> {
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
                   onPressed: () async {
-                    // 1. Guardar la sede seleccionada globalmente en la caja de configuración
                     var configBox = Hive.box('configBox');
                     await configBox.put('sede_activa', sedeSeleccionada);
 
                     usuarioEncontrado!['sedeId'] = sedeSeleccionada;
 
-                    // 2. ABRIR LAS CAJAS DE LA SEDE ANTES DE IR AL DASHBOARD PARA EVITAR EL COLAPSO
+                    // ABRIR TODAS LAS CAJAS AQUÍ PARA QUE ESTÉN DISPONIBLES EN TODA LA APP
                     await Hive.openBox(obtenerNombreBoxSede('clientsBox'));
                     await Hive.openBox(obtenerNombreBoxSede('ventasBox'));
                     await Hive.openBox(obtenerNombreBoxSede('accesosBox'));
+                    await Hive.openBox(obtenerNombreBoxSede('inventarioBox')); // <-- INVENTARIO AÑADIDO
+                    
+                    await Hive.openBox('batidosMenuBox'); 
+                    await Hive.openBox('ventasBatidosBox'); 
 
-                    // 3. Navegar a la siguiente pantalla
                     if (contextDialog.mounted) {
                       Navigator.pop(contextDialog);
-
                       Navigator.pushReplacement(
                         context,
                         MaterialPageRoute(
@@ -133,31 +133,20 @@ class _LoginScreenState extends State<LoginScreen> {
                 const SizedBox(height: 30),
                 TextField(
                   controller: _userController,
-                  decoration: const InputDecoration(
-                    labelText: 'Usuario', 
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.person),
-                  ),
+                  decoration: const InputDecoration(labelText: 'Usuario', border: OutlineInputBorder(), prefixIcon: Icon(Icons.person)),
                 ),
                 const SizedBox(height: 15),
                 TextField(
                   controller: _passController,
                   obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Contraseña', 
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.lock),
-                  ),
+                  decoration: const InputDecoration(labelText: 'Contraseña', border: OutlineInputBorder(), prefixIcon: Icon(Icons.lock)),
                 ),
                 const SizedBox(height: 25),
                 SizedBox(
                   width: double.infinity,
                   height: 48,
                   child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blue, 
-                      foregroundColor: Colors.white,
-                    ),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, foregroundColor: Colors.white),
                     onPressed: () => _intentarLogin(context),
                     child: const Text('Iniciar Sesión', style: TextStyle(fontSize: 16)),
                   ),
