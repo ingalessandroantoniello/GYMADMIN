@@ -5,6 +5,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import '../helpers.dart';
+import 'login_screen.dart'; // Importado para el cierre de sesión
 import 'clients_screen.dart';
 import 'daily_sales_screen.dart';
 import 'access_log_screen.dart';
@@ -265,9 +266,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
         actions: [
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16.0),
+            padding: const EdgeInsets.symmetric(horizontal: 8.0),
             child: Center(child: Text('Rol: ${widget.usuarioActual['rol']}', style: const TextStyle(fontWeight: FontWeight.bold))),
           ),
+          // --- BOTÓN DE CERRAR SESIÓN ---
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.white),
+            tooltip: 'Cerrar Sesión / Cambiar Sede',
+            onPressed: () {
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(builder: (context) => const LoginScreen()),
+              );
+            },
+          ),
+          const SizedBox(width: 10),
         ],
       ),
       
@@ -319,7 +332,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     const NavigationRailDestination(icon: Icon(Icons.people), label: Text('Clientes')),
                     const NavigationRailDestination(icon: Icon(Icons.point_of_sale), label: Text('Ventas')),
                     const NavigationRailDestination(icon: Icon(Icons.fingerprint), label: Text('Accesos')),
-                    const NavigationRailDestination(icon: Icon(Icons.inventory), label: Text('Productos/Membresías')), // <-- CAMBIO AQUÍ
+                    const NavigationRailDestination(icon: Icon(Icons.inventory), label: Text('Productos/Membresías')),
                     const NavigationRailDestination(icon: Icon(Icons.local_cafe), label: Text('Batidos')), 
                     const NavigationRailDestination(icon: Icon(Icons.bar_chart), label: Text('Reportes')),
                     if (widget.usuarioActual['rol'] == 'Administrador')

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -50,7 +51,8 @@ class _ClientsScreenState extends State<ClientsScreen> {
   }
 
   void _mostrarFichaDialog(String clienteId) {
-    bool esAdmin = widget.usuarioActual['rol'] == 'Administrador';
+    // Verificamos si es Administrador o tiene permisos
+    bool tienePermiso = widget.usuarioActual['rol'] == 'Administrador' || widget.usuarioActual['permisosEdicion'] == true;
     showDialog(
       context: context,
       builder: (ctx) => Dialog(
@@ -58,7 +60,7 @@ class _ClientsScreenState extends State<ClientsScreen> {
         child: SizedBox(
           width: 550,
           height: 600,
-          child: FichaClienteWidget(clienteId: clienteId, esAdmin: esAdmin),
+          child: FichaClienteWidget(clienteId: clienteId, esAdmin: tienePermiso),
         ),
       ),
     );
@@ -259,74 +261,192 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
     }
   }
 
-  void _editarMembresiaAdmin(BuildContext context, Map<String, dynamic> cliente) {
+  // --- EDITOR COMPLETO DE TODOS LOS DATOS DEL CLIENTE ---
+  void _editarClienteCompleto(BuildContext context, Map<String, dynamic> cliente) {
+    final TextEditingController nombreCtrl = TextEditingController(text: cliente['nombre'] ?? '');
+    final TextEditingController apellidoCtrl = TextEditingController(text: cliente['apellido'] ?? '');
+    final TextEditingController cedulaCtrl = TextEditingController(text: cliente['cedula'] ?? '');
+    final TextEditingController telefonoCtrl = TextEditingController(text: cliente['telefono'] ?? '');
+    final TextEditingController direccionCtrl = TextEditingController(text: cliente['direccion'] ?? '');
+
     DateTime fechaInicio = _parseDate(cliente['fechaInicio']) ?? DateTime.now();
     DateTime fechaVence = _parseDate(cliente['fechaVencimiento']) ?? DateTime.now().add(const Duration(days: 30));
+    
+    String? fotoEditadaBase64 = cliente['fotoBase64'];
+    bool huellaRegistrada = cliente['huella'] != null && cliente['huella'].toString().isNotEmpty;
 
-    String metodoPagoSeleccionado = cliente['metodoPago'] ?? 'Efectivo USD';
-    List<String> metodosPermitidos = ['Efectivo USD', 'Efectivo BS', 'Pago Móvil', 'Transferencia BS', 'Zelle', 'Binance', 'MIXTO'];
-    if (!metodosPermitidos.contains(metodoPagoSeleccionado) && metodoPagoSeleccionado.isNotEmpty) {
-      metodosPermitidos.add(metodoPagoSeleccionado);
-    }
+    CameraController? cameraController;
+    bool camaraActiva = false;
 
     showDialog(
       context: context,
+      barrierDismissible: false,
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
+            Future<void> activarCamara() async {
+              try {
+                final cameras = await availableCameras();
+                if (cameras.isNotEmpty) {
+                  cameraController = CameraController(cameras[0], ResolutionPreset.low);
+                  await cameraController!.initialize();
+                  setDialogState(() { camaraActiva = true; });
+                }
+              } catch (e) {
+                debugPrint("Error cámara: $e");
+              }
+            }
+
+            Future<void> tomarFoto() async {
+              if (cameraController == null || !cameraController!.value.isInitialized) return;
+              try {
+                final image = await cameraController!.takePicture();
+                final bytes = await image.readAsBytes();
+                setDialogState(() {
+                  fotoEditadaBase64 = base64Encode(bytes);
+                  camaraActiva = false;
+                });
+                cameraController?.dispose();
+              } catch (e) {
+                debugPrint("Error foto: $e");
+              }
+            }
+
             Future<void> seleccionarFecha(bool esInicio) async {
-              final DateTime? seleccion = await showDatePicker(context: context, initialDate: esInicio ? fechaInicio : fechaVence, firstDate: DateTime(2020), lastDate: DateTime(2035));
-              if (seleccion != null) setDialogState(() {
-                if (esInicio) fechaInicio = seleccion; else fechaVence = seleccion;
-              });
+              final DateTime? seleccion = await showDatePicker(
+                context: context, 
+                initialDate: esInicio ? fechaInicio : fechaVence, 
+                firstDate: DateTime(2020), 
+                lastDate: DateTime(2035)
+              );
+              if (seleccion != null) {
+                setDialogState(() {
+                  if (esInicio) fechaInicio = seleccion; else fechaVence = seleccion;
+                });
+              }
             }
 
             return AlertDialog(
-              title: Text('Editar Membresía (ADMIN) - ${cliente['nombre']}', style: const TextStyle(color: Colors.blue)),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              title: Text('Editar Ficha Completa - ${cliente['nombre']}', style: const TextStyle(color: Colors.blue)),
+              content: SizedBox(
+                width: 600,
+                height: 550,
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      InkWell(
-                        onTap: () => seleccionarFecha(true),
-                        child: Column(children: [const Text('Inició el:', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)), Text("${fechaInicio.day.toString().padLeft(2, '0')}/${fechaInicio.month.toString().padLeft(2, '0')}/${fechaInicio.year}")]),
+                      const Text('Datos Personales', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(child: TextField(controller: nombreCtrl, decoration: const InputDecoration(labelText: 'Nombre', border: OutlineInputBorder()))),
+                          const SizedBox(width: 10),
+                          Expanded(child: TextField(controller: apellidoCtrl, decoration: const InputDecoration(labelText: 'Apellido', border: OutlineInputBorder()))),
+                        ],
                       ),
-                      const Icon(Icons.edit_calendar, color: Colors.grey),
-                      InkWell(
-                        onTap: () => seleccionarFecha(false),
-                        child: Column(children: [const Text('Vence el:', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)), Text("${fechaVence.day.toString().padLeft(2, '0')}/${fechaVence.month.toString().padLeft(2, '0')}/${fechaVence.year}")]),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(child: TextField(controller: cedulaCtrl, decoration: const InputDecoration(labelText: 'Cédula', border: OutlineInputBorder()))),
+                          const SizedBox(width: 10),
+                          Expanded(child: TextField(controller: telefonoCtrl, decoration: const InputDecoration(labelText: 'Teléfono', border: OutlineInputBorder()))),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(controller: direccionCtrl, decoration: const InputDecoration(labelText: 'Dirección', border: OutlineInputBorder())),
+                      
+                      const Divider(height: 30),
+                      const Text('Biometría (Foto y Huella)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          // Foto
+                          Expanded(
+                            child: Column(
+                              children: [
+                                Container(
+                                  height: 120,
+                                  decoration: BoxDecoration(color: Colors.black12, borderRadius: BorderRadius.circular(8)),
+                                  child: fotoEditadaBase64 != null
+                                      ? ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.memory(base64Decode(fotoEditadaBase64!.contains(',') ? fotoEditadaBase64!.split(',').last : fotoEditadaBase64!), fit: BoxFit.cover, width: double.infinity))
+                                      : camaraActiva && cameraController != null && cameraController!.value.isInitialized
+                                          ? CameraPreview(cameraController!)
+                                          : Center(child: TextButton.icon(icon: const Icon(Icons.camera_alt), label: const Text('Activar Cámara'), onPressed: activarCamara)),
+                                ),
+                                if (camaraActiva)
+                                  TextButton(onPressed: tomarFoto, child: const Text('Capturar Foto Nueva', style: TextStyle(color: Colors.green))),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 20),
+                          // Huella
+                          Expanded(
+                            child: Column(
+                              children: [
+                                Icon(Icons.fingerprint, size: 60, color: huellaRegistrada ? Colors.green : Colors.grey),
+                                Text(huellaRegistrada ? 'Huella Registrada' : 'Sin Huella', style: const TextStyle(fontSize: 12)),
+                                TextButton.icon(
+                                  icon: const Icon(Icons.scanner, size: 16),
+                                  label: const Text('Actualizar Huella'),
+                                  onPressed: () {
+                                    setDialogState(() { huellaRegistrada = true; });
+                                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Huella reescrita y actualizada con éxito.')));
+                                  },
+                                )
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+
+                      const Divider(height: 30),
+                      const Text('Vigencia del Gimnasio (Fechas)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                      const SizedBox(height: 10),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          InkWell(
+                            onTap: () => seleccionarFecha(true),
+                            child: Column(children: [const Text('Inicio:', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)), Text("${fechaInicio.day.toString().padLeft(2, '0')}/${fechaInicio.month.toString().padLeft(2, '0')}/${fechaInicio.year}", style: const TextStyle(fontSize: 16))]),
+                          ),
+                          const Icon(Icons.arrow_forward, color: Colors.grey),
+                          InkWell(
+                            onTap: () => seleccionarFecha(false),
+                            child: Column(children: [const Text('Vencimiento:', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red)), Text("${fechaVence.day.toString().padLeft(2, '0')}/${fechaVence.month.toString().padLeft(2, '0')}/${fechaVence.year}", style: const TextStyle(fontSize: 16))]),
+                          ),
+                        ],
                       ),
                     ],
                   ),
-                  const SizedBox(height: 30),
-                  DropdownButtonFormField<String>(
-                    value: metodoPagoSeleccionado.isEmpty ? 'Efectivo USD' : metodoPagoSeleccionado,
-                    decoration: const InputDecoration(labelText: 'Forma de Pago Registrada', border: OutlineInputBorder(), prefixIcon: Icon(Icons.payment)),
-                    items: metodosPermitidos.map((m) => DropdownMenuItem(value: m, child: Text(m))).toList(),
-                    onChanged: (val) {
-                      if (val != null) setDialogState(() => metodoPagoSeleccionado = val);
-                    },
-                  ),
-                ],
+                ),
               ),
               actions: [
-                TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
+                TextButton(onPressed: () { cameraController?.dispose(); Navigator.pop(ctx); }, child: const Text('Cancelar')),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.blue.shade900, foregroundColor: Colors.white),
                   onPressed: () async {
+                    cameraController?.dispose();
                     String fInicioStr = "${fechaInicio.day.toString().padLeft(2, '0')}/${fechaInicio.month.toString().padLeft(2, '0')}/${fechaInicio.year}";
                     String fVenceStr = "${fechaVence.day.toString().padLeft(2, '0')}/${fechaVence.month.toString().padLeft(2, '0')}/${fechaVence.year}";
+                    
                     var clienteFicha = Map<String, dynamic>.from(cliente);
+                    clienteFicha['nombre'] = nombreCtrl.text.trim().toUpperCase();
+                    clienteFicha['apellido'] = apellidoCtrl.text.trim().toUpperCase();
+                    clienteFicha['cedula'] = cedulaCtrl.text.trim();
+                    clienteFicha['telefono'] = telefonoCtrl.text.trim();
+                    clienteFicha['direccion'] = direccionCtrl.text.trim().toUpperCase();
+                    clienteFicha['fotoBase64'] = fotoEditadaBase64;
+                    clienteFicha['huella'] = huellaRegistrada ? (cliente['huella'] ?? 'HUELLA_ACTUALIZADA') : null;
                     clienteFicha['fechaInicio'] = fInicioStr;
                     clienteFicha['fechaVencimiento'] = fVenceStr;
-                    clienteFicha['metodoPago'] = metodoPagoSeleccionado;
+
                     await Hive.box(obtenerNombreBoxSede('clientsBox')).put(widget.clienteId, clienteFicha);
-                    if (ctx.mounted) Navigator.pop(ctx);
+                    if (ctx.mounted) {
+                      Navigator.pop(ctx);
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ficha de cliente actualizada con éxito.'), backgroundColor: Colors.green));
+                    }
                   },
-                  child: const Text('Guardar Cambios'),
+                  child: const Text('Guardar Todos los Cambios'),
                 ),
               ],
             );
@@ -336,7 +456,7 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
     );
   }
 
-  // --- LÓGICA DE VENTAS CON CÁLCULO INVERTIDO (SE INGRESA USD, SE COBRAN BS) ---
+  // --- LÓGICA DE VENTAS CON CÁLCULO INVERTIDO ---
   Future<void> _venderMembresia(BuildContext context, Map<String, dynamic> cliente) async {
     String boxSede = obtenerNombreBoxSede('inventarioBox');
     if (!Hive.isBoxOpen(boxSede)) await Hive.openBox(boxSede);
@@ -391,10 +511,7 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
             void recalcular() => setDialogState(() {});
             double parseD(String text) => double.tryParse(text.replaceAll(',', '.')) ?? 0.0;
 
-            // Pagos Directos en USD
             double pagadoDirectoUsd = parseD(efvoUsdCtrl.text) + parseD(zelleCtrl.text) + parseD(binanceCtrl.text);
-            
-            // EL CAJERO INGRESA USD A PAGAR EN BS -> EL SISTEMA CALCULA CUÁNTOS BS DEBE COBRAR
             double dolaresParaPagarEnBs = parseD(efvoBsCtrl.text) + parseD(pagoMovilBsCtrl.text) + parseD(transfBsCtrl.text);
             double totalBsFisicosACobrar = dolaresParaPagarEnBs * tasaUsd;
             
@@ -464,7 +581,6 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
                       ),
                       const SizedBox(height: 20),
                       
-                      // --- TICKET DE SUBTOTAL DETALLADO ---
                       Container(
                         padding: const EdgeInsets.all(15),
                         decoration: BoxDecoration(color: restanteUsd <= 0.05 ? Colors.green.shade50 : Colors.red.shade50, borderRadius: BorderRadius.circular(8), border: Border.all(color: restanteUsd <= 0.05 ? Colors.green : Colors.red.shade300)),
@@ -512,7 +628,7 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
                     final idVenta = DateTime.now().millisecondsSinceEpoch.toString();
                     final nuevaVenta = {
                       'id': idVenta,
-                      'concepto': productoSeleccionado != null ? 'Venta: $productoSeleccionado' : 'Membresía (${fechaInicio.day}/${fechaInicio.month} al ${fechaCierre.day}/${fechaCierre.month})',
+                      'concepto': productoSeleccionado != null ? 'Venta: $productoSeleccionado' : 'Membresía',
                       'monto': totalFacturaUsd,
                       'metodoPago': 'MIXTO',
                       'pagosDetalle': desglose,
@@ -579,7 +695,11 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
                         Row(
                           children: [
                             if (widget.esAdmin)
-                              OutlinedButton.icon(icon: const Icon(Icons.edit, size: 14), label: const Text('Editar', style: TextStyle(fontSize: 12)), onPressed: () => _editarMembresiaAdmin(context, cliente)),
+                              OutlinedButton.icon(
+                                icon: const Icon(Icons.edit, size: 14), 
+                                label: const Text('Editar', style: TextStyle(fontSize: 12)), 
+                                onPressed: () => _editarClienteCompleto(context, cliente), // <-- LLAMA AL NUEVO EDITOR COMPLETO
+                              ),
                             const SizedBox(width: 10),
                             ElevatedButton.icon(
                               style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 15)),
