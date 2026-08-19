@@ -12,7 +12,6 @@ class DailySalesScreen extends StatefulWidget {
 
 class _DailySalesScreenState extends State<DailySalesScreen> {
 
-  // --- MODIFICAR O ELIMINAR VENTA (ACTUALIZANDO REPORTES AL INSTANTE) ---
   void _modificarVenta(String ventaKey, Map<String, dynamic> ventaActual) {
     bool esAdmin = widget.usuarioActual['rol'] == 'Administrador' || widget.usuarioActual['permisosEdicion'] == true;
     if (!esAdmin) {
@@ -63,7 +62,7 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
                   label: const Text('Eliminar Venta'),
                   onPressed: () async {
                     await Hive.box(obtenerNombreBoxSede('ventasBox')).delete(ventaKey);
-                    if (mounted) setState(() {}); // Refresca la vista local de la lista
+                    if (mounted) setState(() {});
                     if (ctx.mounted) {
                       Navigator.pop(ctx);
                       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Venta eliminada y reportes actualizados.'), backgroundColor: Colors.red));
@@ -79,14 +78,12 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
                     ventaModificada['concepto'] = conceptoCtrl.text.trim();
                     ventaModificada['monto'] = nuevoMonto;
                     ventaModificada['metodoPago'] = metodoSeleccionado;
-
-                    // Si se cambió a un método específico, ajustamos también el desglose interno para los reportes
                     ventaModificada['pagosDetalle'] = [
                       {'metodo': metodoSeleccionado, 'monto': nuevoMonto}
                     ];
 
                     await Hive.box(obtenerNombreBoxSede('ventasBox')).put(ventaKey, ventaModificada);
-                    if (mounted) setState(() {}); // Refresca la vista local de la lista
+                    if (mounted) setState(() {});
                     
                     if (ctx.mounted) {
                       Navigator.pop(ctx);
@@ -103,7 +100,7 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
     );
   }
 
-  // --- VENTANA PARA NUEVA VENTA GENERAL CON RASTREADOR DE INVENTARIO ---
+  // --- VENTANA PARA NUEVA VENTA (SOLO PRODUCTOS, EXCLUYENDO MEMBRESÍAS) ---
   Future<void> _abrirModalNuevaVenta(BuildContext context) async {
     String boxSede = obtenerNombreBoxSede('inventarioBox');
     if (!Hive.isBoxOpen(boxSede)) await Hive.openBox(boxSede);
@@ -112,15 +109,21 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
     var invSede = Hive.box(boxSede);
     var invGlobal = Hive.box('inventarioBox');
 
-    Map<String, double> productosUnicos = {};
+    Map<String, double> productosDisponibles = {};
 
     void extraerProductos(Box box) {
       for (var e in box.values) {
         var p = Map<String, dynamic>.from(e as Map);
         String n = (p['nombre'] ?? p['producto'] ?? p['articulo'] ?? p['descripcion'] ?? '').toString().trim();
         if (n.isNotEmpty) {
-           double pr = double.tryParse(p['precioVenta']?.toString() ?? p['precio']?.toString() ?? p['costo']?.toString() ?? '0') ?? 0.0;
-           productosUnicos[n] = pr;
+           String lower = n.toLowerCase();
+           // Filtramos y excluimos cualquier concepto que sea membresía o mensualidad
+           bool esMembresia = lower.contains('membresía') || lower.contains('membresia') || lower.contains('mensualidad') || lower.contains('inscripcion') || lower.contains('pase');
+           
+           if (!esMembresia) {
+             double pr = double.tryParse(p['precioVenta']?.toString() ?? p['precio']?.toString() ?? p['costo']?.toString() ?? '0') ?? 0.0;
+             productosDisponibles[n] = pr;
+           }
         }
       }
     }
@@ -128,22 +131,20 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
     extraerProductos(invSede);
     extraerProductos(invGlobal);
 
-    if (productosUnicos.isEmpty) {
+    if (productosDisponibles.isEmpty) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No hay productos ni membresías registradas en el módulo de Inventario.'), backgroundColor: Colors.orange));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No hay productos físicos registrados en el inventario (las membresías se gestionan desde Clientes).'), backgroundColor: Colors.orange));
       }
       return;
     }
 
-    String boxClientesNombre = obtenerNombreBoxSede('clientsBox');
-    var boxClientes = Hive.box(boxClientesNombre);
-
     final double tasaUsd = Hive.box('configBox').get('tasa_usd', defaultValue: 1.0);
     
+    List<Map<String, dynamic>> carrito = [];
+    
     String? productoSeleccionado;
-    double precioUnitario = 0.0;
-    bool esMembresiaOAsociado = false;
-    String? clienteIdSeleccionado;
+    double precioActualItem = 0.0;
+    final TextEditingController cantidadCtrl = TextEditingController(text: '1');
 
     final TextEditingController efvoUsdCtrl = TextEditingController();
     final TextEditingController zelleCtrl = TextEditingController();
@@ -163,18 +164,20 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
             void recalcular() => setDialogState(() {});
             double parseD(String text) => double.tryParse(text.replaceAll(',', '.')) ?? 0.0;
 
+            double totalFacturaUsd = carrito.fold(0.0, (sum, item) => sum + (item['precio'] * item['cantidad']));
+
             double pagadoDirectoUsd = parseD(efvoUsdCtrl.text) + parseD(zelleCtrl.text) + parseD(binanceCtrl.text);
             double dolaresParaPagarEnBs = parseD(efvoBsCtrl.text) + parseD(pagoMovilBsCtrl.text) + parseD(transfBsCtrl.text);
             double totalBsFisicosACobrar = dolaresParaPagarEnBs * tasaUsd;
             
             double totalPagadoEnUsd = pagadoDirectoUsd + dolaresParaPagarEnBs;
-            double restanteUsd = precioUnitario - totalPagadoEnUsd;
+            double restanteUsd = totalFacturaUsd - totalPagadoEnUsd;
 
             return AlertDialog(
-              title: const Text('Registrar Nueva Venta'),
+              title: const Text('Registrar Venta de Productos (Carrito)'),
               content: SingleChildScrollView(
                 child: SizedBox(
-                  width: 550,
+                  width: 650,
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -188,60 +191,100 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
                       ),
                       const SizedBox(height: 15),
 
-                      DropdownButtonFormField<String>(
-                        decoration: const InputDecoration(labelText: 'Seleccionar Producto o Membresía', border: OutlineInputBorder(), prefixIcon: Icon(Icons.shopping_bag)),
-                        value: productoSeleccionado,
-                        items: productosUnicos.entries.map((entry) {
-                          return DropdownMenuItem<String>(
-                            value: entry.key,
-                            child: Text("${entry.key} - \$${entry.value.toStringAsFixed(2)}"),
-                          );
-                        }).toList(),
-                        onChanged: (val) {
-                          if (val != null) {
-                            setDialogState(() {
-                              productoSeleccionado = val;
-                              precioUnitario = productosUnicos[val] ?? 0.0;
-                              
-                              String lower = val.toLowerCase();
-                              esMembresiaOAsociado = lower.contains('membresía') || lower.contains('mensualidad') || lower.contains('inscripcion') || lower.contains('pase');
-                            });
-                          }
-                        },
+                      Row(
+                        children: [
+                          Expanded(
+                            flex: 3,
+                            child: DropdownButtonFormField<String>(
+                              decoration: const InputDecoration(labelText: 'Seleccionar Producto', border: OutlineInputBorder(), prefixIcon: Icon(Icons.shopping_bag)),
+                              value: productoSeleccionado,
+                              items: productosDisponibles.entries.map((entry) {
+                                return DropdownMenuItem<String>(
+                                  value: entry.key,
+                                  child: Text("${entry.key} - \$${entry.value.toStringAsFixed(2)}"),
+                                );
+                              }).toList(),
+                              onChanged: (val) {
+                                if (val != null) {
+                                  setDialogState(() {
+                                    productoSeleccionado = val;
+                                    precioActualItem = productosDisponibles[val] ?? 0.0;
+                                    cantidadCtrl.text = '1';
+                                  });
+                                }
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          SizedBox(
+                            width: 90,
+                            child: TextField(
+                              controller: cantidadCtrl,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(labelText: 'Cant.', border: OutlineInputBorder()),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.blue.shade800, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 12)),
+                            onPressed: productoSeleccionado == null ? null : () {
+                              int cant = int.tryParse(cantidadCtrl.text) ?? 1;
+                              if (cant < 1) cant = 1;
+
+                              setDialogState(() {
+                                int index = carrito.indexWhere((item) => item['nombre'] == productoSeleccionado);
+                                if (index >= 0) {
+                                  carrito[index]['cantidad'] += cant;
+                                } else {
+                                  carrito.add({
+                                    'nombre': productoSeleccionado,
+                                    'precio': precioActualItem,
+                                    'cantidad': cant,
+                                  });
+                                }
+
+                                productoSeleccionado = null;
+                                cantidadCtrl.text = '1';
+                              });
+                            },
+                            icon: const Icon(Icons.add),
+                            label: const Text('Agregar'),
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 15),
 
-                      if (esMembresiaOAsociado) ...[
-                        const Text('Asociar a Cliente (Membresía):', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
-                        const SizedBox(height: 8),
-                        Autocomplete<Map<String, dynamic>>(
-                          displayStringForOption: (option) => "${option['nombre']} ${option['apellido'] ?? ''} - C.I: ${option['cedula']}",
-                          optionsBuilder: (TextEditingValue textEditingValue) {
-                            if (textEditingValue.text.isEmpty) return const Iterable<Map<String, dynamic>>.empty();
-                            return boxClientes.keys.map((k) {
-                              var c = Map<String, dynamic>.from(boxClientes.get(k) as Map);
-                              c['id'] = k;
-                              return c;
-                            }).where((c) {
-                              String q = textEditingValue.text.toLowerCase();
-                              String nom = "${c['nombre']} ${c['apellido'] ?? ''}".toLowerCase();
-                              String ced = (c['cedula'] ?? '').toString().toLowerCase();
-                              return nom.contains(q) || ced.contains(q);
-                            });
-                          },
-                          onSelected: (selection) {
-                            setDialogState(() {
-                              clienteIdSeleccionado = selection['id'].toString();
-                            });
-                          },
-                          fieldViewBuilder: (context, controller, focusNode, onEditingComplete) {
-                            return TextField(
-                              controller: controller,
-                              focusNode: focusNode,
-                              onEditingComplete: onEditingComplete,
-                              decoration: const InputDecoration(labelText: 'Buscar por Nombre o Cédula del Cliente', border: OutlineInputBorder(), prefixIcon: Icon(Icons.person_search)),
-                            );
-                          },
+                      if (carrito.isNotEmpty) ...[
+                        const Text('Productos en la Transacción:', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                        const SizedBox(height: 5),
+                        Container(
+                          height: 120,
+                          decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(8)),
+                          child: ListView.builder(
+                            itemCount: carrito.length,
+                            itemBuilder: (context, i) {
+                              var item = carrito[i];
+                              double subtotal = item['precio'] * item['cantidad'];
+                              return ListTile(
+                                dense: true,
+                                title: Text("${item['nombre']} (x${item['cantidad']})", style: const TextStyle(fontWeight: FontWeight.bold)),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text("\$${subtotal.toStringAsFixed(2)}", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
+                                    IconButton(
+                                      icon: const Icon(Icons.delete, color: Colors.red, size: 18),
+                                      onPressed: () {
+                                        setDialogState(() {
+                                          carrito.removeAt(i);
+                                        });
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
                         ),
                         const SizedBox(height: 15),
                       ],
@@ -278,7 +321,7 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
                         decoration: BoxDecoration(color: restanteUsd <= 0.05 ? Colors.green.shade50 : Colors.red.shade50, borderRadius: BorderRadius.circular(8)),
                         child: Column(
                           children: [
-                            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text('Total a Pagar:', style: TextStyle(fontWeight: FontWeight.bold)), Text('\$${precioUnitario.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold))]),
+                            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text('Total a Pagar:', style: TextStyle(fontWeight: FontWeight.bold)), Text('\$${totalFacturaUsd.toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold))]),
                             const Divider(),
                             Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [const Text('Total Ingresado (USD):'), Text('\$${totalPagadoEnUsd.toStringAsFixed(2)}')]),
                             if (dolaresParaPagarEnBs > 0)
@@ -301,7 +344,7 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
                   icon: const Icon(Icons.save),
                   label: const Text('Procesar Venta'),
-                  onPressed: productoSeleccionado == null || restanteUsd > 0.05 || (esMembresiaOAsociado && clienteIdSeleccionado == null) ? null : () async {
+                  onPressed: carrito.isEmpty || restanteUsd > 0.05 ? null : () async {
                     List<Map<String, dynamic>> desglose = [];
                     List<String> metodos = [];
 
@@ -315,37 +358,26 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
                     final hoy = DateTime.now();
                     final idVenta = hoy.millisecondsSinceEpoch.toString();
                     
+                    String conceptoUnificado = carrito.map((item) => "${item['cantidad']}x ${item['nombre']}").join(', ');
+
                     final nuevaVenta = {
                       'id': idVenta,
-                      'concepto': productoSeleccionado,
-                      'monto': precioUnitario,
+                      'concepto': conceptoUnificado,
+                      'monto': totalFacturaUsd,
                       'metodoPago': metodos.length == 1 ? metodos.first : 'MIXTO',
                       'pagosDetalle': desglose,
-                      'clienteId': clienteIdSeleccionado,
+                      'carritoItems': carrito,
+                      'clienteId': null, // Sin cliente porque son productos físicos
                       'fecha': "${hoy.day.toString().padLeft(2, '0')}/${hoy.month.toString().padLeft(2, '0')}/${hoy.year}",
                       'hora': "${hoy.hour}:${hoy.minute.toString().padLeft(2, '0')}",
                     };
 
                     await Hive.box(obtenerNombreBoxSede('ventasBox')).put(idVenta, nuevaVenta);
-                    if (mounted) setState(() {}); // Refresca localmente
-
-                    if (esMembresiaOAsociado && clienteIdSeleccionado != null) {
-                      var clienteBox = Hive.box(obtenerNombreBoxSede('clientsBox'));
-                      var cliData = clienteBox.get(clienteIdSeleccionado);
-                      if (cliData != null) {
-                        var cMap = Map<String, dynamic>.from(cliData as Map);
-                        DateTime fInicio = DateTime.now();
-                        DateTime fVence = DateTime.now().add(const Duration(days: 30));
-                        cMap['fechaInicio'] = "${fInicio.day.toString().padLeft(2, '0')}/${fInicio.month.toString().padLeft(2, '0')}/${fInicio.year}";
-                        cMap['fechaVencimiento'] = "${fVence.day.toString().padLeft(2, '0')}/${fVence.month.toString().padLeft(2, '0')}/${fVence.year}";
-                        cMap['metodoPago'] = nuevaVenta['metodoPago'];
-                        await clienteBox.put(clienteIdSeleccionado, cMap);
-                      }
-                    }
+                    if (mounted) setState(() {});
 
                     if (ctx.mounted) {
                       Navigator.pop(ctx);
-                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Venta procesada con éxito.'), backgroundColor: Colors.green));
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Venta de productos procesada con éxito.'), backgroundColor: Colors.green));
                     }
                   },
                 ),
@@ -376,7 +408,7 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15)),
                   onPressed: () => _abrirModalNuevaVenta(context),
                   icon: const Icon(Icons.point_of_sale),
-                  label: const Text('VENDER PRODUCTO / MEMBRESÍA', style: TextStyle(fontWeight: FontWeight.bold)),
+                  label: const Text('VENDER PRODUCTOS', style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
               ],
             ),
