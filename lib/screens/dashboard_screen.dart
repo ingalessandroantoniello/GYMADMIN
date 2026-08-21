@@ -108,6 +108,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
+  // --- PANEL DE ENTRADAS EN VIVO ACTUALIZADO ---
   Widget _buildLiveFeedPanel(String boxAccesosNombre, String boxClientesNombre) {
     return Container(
       width: 260,
@@ -124,54 +125,118 @@ class _DashboardScreenState extends State<DashboardScreen> {
             child: ValueListenableBuilder(
               valueListenable: Hive.box(boxAccesosNombre).listenable(),
               builder: (context, Box boxAccesos, _) {
-                final hoy = DateTime.now();
-                final fechaHoy = "${hoy.day.toString().padLeft(2,'0')}/${hoy.month.toString().padLeft(2,'0')}/${hoy.year}";
+                if (boxAccesos.isEmpty) {
+                  return const Center(child: Text('Sin entradas recientes', style: TextStyle(color: Colors.grey)));
+                }
 
-                final listaHoy = boxAccesos.values
+                final hoy = DateTime.now();
+                final fechaHoy = "${hoy.day.toString().padLeft(2, '0')}/${hoy.month.toString().padLeft(2, '0')}/${hoy.year}";
+                
+                var accesosHoy = boxAccesos.values
                     .map((e) => Map<String, dynamic>.from(e as Map))
                     .where((a) => a['fecha'] == fechaHoy)
                     .toList()
                     .reversed
                     .toList();
 
-                if (listaHoy.isEmpty) return const Center(child: Text('Esperando ingresos...', style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic, fontSize: 12)));
+                if (accesosHoy.isEmpty) {
+                  return const Center(child: Text('Sin entradas el día de hoy', style: TextStyle(color: Colors.grey)));
+                }
+
+                var boxClientes = Hive.box(boxClientesNombre);
+                List<dynamic> clientesKeys = boxClientes.keys.toList();
 
                 return ListView.builder(
-                  itemCount: listaHoy.length,
+                  padding: const EdgeInsets.only(top: 10),
+                  itemCount: accesosHoy.length,
                   itemBuilder: (context, index) {
-                    final acceso = listaHoy[index];
-                    final cliente = Hive.box(boxClientesNombre).get(acceso['clienteId']);
+                    var acceso = accesosHoy[index];
+                    bool accesoPermitido = acceso['estado'] == 'ACCESO PERMITIDO';
                     
-                    Uint8List? img;
-                    String nombre = acceso['nombre'] ?? 'Desconocido';
-                    
-                    if (cliente != null) {
-                      final c = Map<String, dynamic>.from(cliente as Map);
-                      String? b64 = c['fotoBase64'];
-                      if (b64 != null && b64.isNotEmpty) {
-                        try {
-                          img = base64Decode(b64.contains(',') ? b64.split(',').last.replaceAll(RegExp(r'\s+'), '') : b64.replaceAll(RegExp(r'\s+'), ''));
-                        } catch(e) { }
-                      }
-                      nombre = "${c['nombre']} ${c['apellido'] ?? ''}";
+                    String? clienteId = acceso['clienteId'];
+                    Map<String, dynamic>? clienteData;
+                    int numCliente = 0;
+
+                    if (clienteId != null && boxClientes.containsKey(clienteId)) {
+                      clienteData = Map<String, dynamic>.from(boxClientes.get(clienteId) as Map);
+                      numCliente = clientesKeys.indexOf(clienteId) + 1;
                     }
 
-                    bool aprobado = acceso['estado'] == 'ACCESO PERMITIDO';
+                    String nombre = acceso['nombre'] ?? 'Desconocido';
+                    String cedula = acceso['cedula'] ?? (clienteData?['cedula'] ?? 'N/A');
+                    String fechaVence = clienteData?['fechaVencimiento'] ?? 'Sin Membresía';
+                    String hora = acceso['hora'] ?? '';
 
-                    return Card(
-                      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      shape: RoundedRectangleBorder(side: BorderSide(color: aprobado ? Colors.green.shade400 : Colors.red.shade400, width: 2), borderRadius: BorderRadius.circular(8)),
-                      child: ListTile(
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        leading: CircleAvatar(
-                          radius: 18,
-                          backgroundColor: Colors.grey.shade300,
-                          backgroundImage: img != null ? MemoryImage(img) : null,
-                          child: img == null ? const Icon(Icons.person, color: Colors.white, size: 20) : null,
+                    Uint8List? foto;
+                    if (clienteData != null && clienteData['fotoBase64'] != null) {
+                      try {
+                        String base64String = clienteData['fotoBase64'];
+                        String cleanString = base64String.contains(',') ? base64String.split(',').last : base64String;
+                        foto = base64Decode(cleanString.replaceAll(RegExp(r'\s+'), ''));
+                      } catch (_) {}
+                    }
+
+                    return Container(
+                      margin: const EdgeInsets.only(bottom: 10, left: 10, right: 10),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: accesoPermitido ? Colors.green : Colors.red, width: 2),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(8.0),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            CircleAvatar(
+                              radius: 26,
+                              backgroundColor: Colors.grey.shade200,
+                              backgroundImage: foto != null ? MemoryImage(foto) : null,
+                              child: foto == null ? const Icon(Icons.person, color: Colors.grey) : null,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    nombre,
+                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    'C.I: $cedula | N° $numCliente', 
+                                    style: TextStyle(fontSize: 11, color: Colors.grey.shade800)
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    'Vence: $fechaVence', 
+                                    style: TextStyle(
+                                      fontSize: 11, 
+                                      fontWeight: FontWeight.bold, 
+                                      color: accesoPermitido ? Colors.green.shade700 : Colors.red.shade700
+                                    )
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    'Hora: $hora', 
+                                    style: const TextStyle(fontSize: 11, color: Colors.blue, fontWeight: FontWeight.bold)
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.only(top: 5),
+                              child: Icon(
+                                accesoPermitido ? Icons.check_circle : Icons.cancel,
+                                color: accesoPermitido ? Colors.green : Colors.red,
+                                size: 26,
+                              ),
+                            ),
+                          ],
                         ),
-                        title: Text(nombre, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11), overflow: TextOverflow.ellipsis),
-                        subtitle: Text(acceso['hora'] ?? '', style: TextStyle(color: Colors.blue.shade800, fontSize: 10, fontWeight: FontWeight.bold)),
-                        trailing: Icon(aprobado ? Icons.check_circle : Icons.cancel, color: aprobado ? Colors.green : Colors.red, size: 18),
                       ),
                     );
                   },
@@ -269,7 +334,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 8.0),
             child: Center(child: Text('Rol: ${widget.usuarioActual['rol']}', style: const TextStyle(fontWeight: FontWeight.bold))),
           ),
-          // --- BOTÓN DE CERRAR SESIÓN ---
           IconButton(
             icon: const Icon(Icons.logout, color: Colors.white),
             tooltip: 'Cerrar Sesión / Cambiar Sede',

@@ -100,7 +100,7 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
     );
   }
 
-  // --- VENTANA PARA NUEVA VENTA (SOLO PRODUCTOS, EXCLUYENDO MEMBRESÍAS) ---
+  // --- VENTANA PARA NUEVA VENTA (SOLO PRODUCTOS FÍSICOS) ---
   Future<void> _abrirModalNuevaVenta(BuildContext context) async {
     String boxSede = obtenerNombreBoxSede('inventarioBox');
     if (!Hive.isBoxOpen(boxSede)) await Hive.openBox(boxSede);
@@ -117,7 +117,6 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
         String n = (p['nombre'] ?? p['producto'] ?? p['articulo'] ?? p['descripcion'] ?? '').toString().trim();
         if (n.isNotEmpty) {
            String lower = n.toLowerCase();
-           // Filtramos y excluimos cualquier concepto que sea membresía o mensualidad
            bool esMembresia = lower.contains('membresía') || lower.contains('membresia') || lower.contains('mensualidad') || lower.contains('inscripcion') || lower.contains('pase');
            
            if (!esMembresia) {
@@ -133,7 +132,7 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
 
     if (productosDisponibles.isEmpty) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No hay productos físicos registrados en el inventario (las membresías se gestionan desde Clientes).'), backgroundColor: Colors.orange));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No hay productos físicos registrados en el inventario.'), backgroundColor: Colors.orange));
       }
       return;
     }
@@ -164,8 +163,19 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
             void recalcular() => setDialogState(() {});
             double parseD(String text) => double.tryParse(text.replaceAll(',', '.')) ?? 0.0;
 
-            double totalFacturaUsd = carrito.fold(0.0, (sum, item) => sum + (item['precio'] * item['cantidad']));
+            int cantActual = int.tryParse(cantidadCtrl.text) ?? 1;
+            if (cantActual < 1) cantActual = 1;
 
+            // 1. Calculamos el subtotal del producto que está actualmente seleccionado (aunque no le hayan dado a "Agregar")
+            double subtotalPendiente = (productoSeleccionado != null) ? (precioActualItem * cantActual) : 0.0;
+
+            // 2. Sumamos lo que ya esté en el carrito
+            double totalCarrito = carrito.fold(0.0, (sum, item) => sum + (item['precio'] * item['cantidad']));
+
+            // 3. El total global ahora incluye ambas cosas para que el cajero lo vea en tiempo real
+            double totalFacturaUsd = totalCarrito + subtotalPendiente;
+
+            // Lógica de pagos
             double pagadoDirectoUsd = parseD(efvoUsdCtrl.text) + parseD(zelleCtrl.text) + parseD(binanceCtrl.text);
             double dolaresParaPagarEnBs = parseD(efvoBsCtrl.text) + parseD(pagoMovilBsCtrl.text) + parseD(transfBsCtrl.text);
             double totalBsFisicosACobrar = dolaresParaPagarEnBs * tasaUsd;
@@ -192,12 +202,14 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
                       const SizedBox(height: 15),
 
                       Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Expanded(
                             flex: 3,
                             child: DropdownButtonFormField<String>(
                               decoration: const InputDecoration(labelText: 'Seleccionar Producto', border: OutlineInputBorder(), prefixIcon: Icon(Icons.shopping_bag)),
                               value: productoSeleccionado,
+                              isExpanded: true,
                               items: productosDisponibles.entries.map((entry) {
                                 return DropdownMenuItem<String>(
                                   value: entry.key,
@@ -221,41 +233,51 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
                             child: TextField(
                               controller: cantidadCtrl,
                               keyboardType: TextInputType.number,
+                              onChanged: (_) => recalcular(), // Actualiza el total global automáticamente al tipear
                               decoration: const InputDecoration(labelText: 'Cant.', border: OutlineInputBorder()),
                             ),
                           ),
                           const SizedBox(width: 10),
-                          ElevatedButton.icon(
-                            style: ElevatedButton.styleFrom(backgroundColor: Colors.blue.shade800, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 12)),
-                            onPressed: productoSeleccionado == null ? null : () {
-                              int cant = int.tryParse(cantidadCtrl.text) ?? 1;
-                              if (cant < 1) cant = 1;
-
-                              setDialogState(() {
-                                int index = carrito.indexWhere((item) => item['nombre'] == productoSeleccionado);
-                                if (index >= 0) {
-                                  carrito[index]['cantidad'] += cant;
-                                } else {
-                                  carrito.add({
-                                    'nombre': productoSeleccionado,
-                                    'precio': precioActualItem,
-                                    'cantidad': cant,
-                                  });
-                                }
-
-                                productoSeleccionado = null;
-                                cantidadCtrl.text = '1';
-                              });
-                            },
-                            icon: const Icon(Icons.add),
-                            label: const Text('Agregar'),
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4.0),
+                            child: ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(backgroundColor: Colors.blue.shade800, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12)),
+                              onPressed: productoSeleccionado == null ? null : () {
+                                setDialogState(() {
+                                  int index = carrito.indexWhere((item) => item['nombre'] == productoSeleccionado);
+                                  if (index >= 0) {
+                                    carrito[index]['cantidad'] += cantActual;
+                                  } else {
+                                    carrito.add({
+                                      'nombre': productoSeleccionado,
+                                      'precio': precioActualItem,
+                                      'cantidad': cantActual,
+                                    });
+                                  }
+                                  productoSeleccionado = null;
+                                  cantidadCtrl.text = '1';
+                                });
+                              },
+                              icon: const Icon(Icons.add),
+                              label: const Text('Agregar'),
+                            ),
                           ),
                         ],
                       ),
+                      // Etiqueta dinámica de Subtotal por producto seleccionado
+                      if (productoSeleccionado != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8.0, bottom: 8.0),
+                          child: Text(
+                            'Total a pagar por ${cantActual}x $productoSeleccionado: \$${subtotalPendiente.toStringAsFixed(2)}',
+                            style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue, fontStyle: FontStyle.italic),
+                          ),
+                        ),
+                      
                       const SizedBox(height: 15),
 
                       if (carrito.isNotEmpty) ...[
-                        const Text('Productos en la Transacción:', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                        const Text('Productos en el Carrito:', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
                         const SizedBox(height: 5),
                         Container(
                           height: 120,
@@ -344,7 +366,23 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
                   icon: const Icon(Icons.save),
                   label: const Text('Procesar Venta'),
-                  onPressed: carrito.isEmpty || restanteUsd > 0.05 ? null : () async {
+                  // Si no hay carrito Y no hay producto seleccionado, se deshabilita
+                  onPressed: (carrito.isEmpty && productoSeleccionado == null) || restanteUsd > 0.05 ? null : () async {
+                    
+                    // AUTO-AGREGAR AL CARRITO: Si el cajero seleccionó un producto pero olvidó darle a "Agregar", lo sumamos automáticamente antes de procesar.
+                    if (productoSeleccionado != null) {
+                      int index = carrito.indexWhere((item) => item['nombre'] == productoSeleccionado);
+                      if (index >= 0) {
+                        carrito[index]['cantidad'] += cantActual;
+                      } else {
+                        carrito.add({
+                          'nombre': productoSeleccionado,
+                          'precio': precioActualItem,
+                          'cantidad': cantActual,
+                        });
+                      }
+                    }
+
                     List<Map<String, dynamic>> desglose = [];
                     List<String> metodos = [];
 
@@ -367,7 +405,7 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
                       'metodoPago': metodos.length == 1 ? metodos.first : 'MIXTO',
                       'pagosDetalle': desglose,
                       'carritoItems': carrito,
-                      'clienteId': null, // Sin cliente porque son productos físicos
+                      'clienteId': null, 
                       'fecha': "${hoy.day.toString().padLeft(2, '0')}/${hoy.month.toString().padLeft(2, '0')}/${hoy.year}",
                       'hora': "${hoy.hour}:${hoy.minute.toString().padLeft(2, '0')}",
                     };
@@ -504,4 +542,4 @@ class _DailySalesScreenState extends State<DailySalesScreen> {
       ),
     );
   }
-}
+}  
