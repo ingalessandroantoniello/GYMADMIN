@@ -51,7 +51,6 @@ class _ClientsScreenState extends State<ClientsScreen> {
   }
 
   void _mostrarFichaDialog(String clienteId) {
-    // Verificamos si es Administrador o tiene permisos
     bool tienePermiso = widget.usuarioActual['rol'] == 'Administrador' || widget.usuarioActual['permisosEdicion'] == true;
     showDialog(
       context: context,
@@ -261,7 +260,7 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
     }
   }
 
-  // --- EDITOR COMPLETO DE TODOS LOS DATOS DEL CLIENTE ---
+  // --- EDITOR COMPLETO CON DETECCIÓN Y SELECCIÓN DE MÚLTIPLES CÁMARAS USB ---
   void _editarClienteCompleto(BuildContext context, Map<String, dynamic> cliente) {
     final TextEditingController nombreCtrl = TextEditingController(text: cliente['nombre'] ?? '');
     final TextEditingController apellidoCtrl = TextEditingController(text: cliente['apellido'] ?? '');
@@ -275,8 +274,10 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
     String? fotoEditadaBase64 = cliente['fotoBase64'];
     bool huellaRegistrada = cliente['huella'] != null && cliente['huella'].toString().isNotEmpty;
 
+    List<CameraDescription> availableCams = [];
     CameraController? cameraController;
     bool camaraActiva = false;
+    int selectedCameraIndex = 0;
 
     showDialog(
       context: context,
@@ -284,16 +285,31 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
+            Future<void> cambiarCamara(int index) async {
+              if (availableCams.isEmpty) return;
+              await cameraController?.dispose();
+              selectedCameraIndex = index;
+              cameraController = CameraController(availableCams[selectedCameraIndex], ResolutionPreset.medium);
+              try {
+                await cameraController!.initialize();
+                setDialogState(() { camaraActiva = true; });
+              } catch (e) {
+                debugPrint("Error al iniciar cámara USB: $e");
+              }
+            }
+
             Future<void> activarCamara() async {
               try {
-                final cameras = await availableCameras();
-                if (cameras.isNotEmpty) {
-                  cameraController = CameraController(cameras[0], ResolutionPreset.low);
-                  await cameraController!.initialize();
-                  setDialogState(() { camaraActiva = true; });
+                availableCams = await availableCameras();
+                if (availableCams.isNotEmpty) {
+                  await cambiarCamara(0);
+                } else {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No se detectaron cámaras USB conectadas.'), backgroundColor: Colors.orange));
+                  }
                 }
               } catch (e) {
-                debugPrint("Error cámara: $e");
+                debugPrint("Error listando cámaras: $e");
               }
             }
 
@@ -308,7 +324,7 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
                 });
                 cameraController?.dispose();
               } catch (e) {
-                debugPrint("Error foto: $e");
+                debugPrint("Error tomando foto: $e");
               }
             }
 
@@ -329,8 +345,8 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
             return AlertDialog(
               title: Text('Editar Ficha Completa - ${cliente['nombre']}', style: const TextStyle(color: Colors.blue)),
               content: SizedBox(
-                width: 600,
-                height: 550,
+                width: 650,
+                height: 580,
                 child: SingleChildScrollView(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -356,30 +372,47 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
                       TextField(controller: direccionCtrl, decoration: const InputDecoration(labelText: 'Dirección', border: OutlineInputBorder())),
                       
                       const Divider(height: 30),
-                      const Text('Biometría (Foto y Huella)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                      const Text('Biometría (Cámara USB y Huella)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
                       const SizedBox(height: 10),
                       Row(
                         children: [
-                          // Foto
+                          // Sección de Cámara
                           Expanded(
                             child: Column(
                               children: [
+                                if (availableCams.length > 1 && camaraActiva)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 8.0),
+                                    child: DropdownButton<int>(
+                                      value: selectedCameraIndex,
+                                      isDense: true,
+                                      items: List.generate(availableCams.length, (index) {
+                                        return DropdownMenuItem(
+                                          value: index,
+                                          child: Text("Cámara ${index + 1}: ${availableCams[index].name}", style: const TextStyle(fontSize: 12)),
+                                        );
+                                      }),
+                                      onChanged: (val) {
+                                        if (val != null) cambiarCamara(val);
+                                      },
+                                    ),
+                                  ),
                                 Container(
-                                  height: 120,
+                                  height: 130,
                                   decoration: BoxDecoration(color: Colors.black12, borderRadius: BorderRadius.circular(8)),
-                                  child: fotoEditadaBase64 != null
+                                  child: fotoEditadaBase64 != null && !camaraActiva
                                       ? ClipRRect(borderRadius: BorderRadius.circular(8), child: Image.memory(base64Decode(fotoEditadaBase64!.contains(',') ? fotoEditadaBase64!.split(',').last : fotoEditadaBase64!), fit: BoxFit.cover, width: double.infinity))
                                       : camaraActiva && cameraController != null && cameraController!.value.isInitialized
-                                          ? CameraPreview(cameraController!)
-                                          : Center(child: TextButton.icon(icon: const Icon(Icons.camera_alt), label: const Text('Activar Cámara'), onPressed: activarCamara)),
+                                          ? ClipRRect(borderRadius: BorderRadius.circular(8), child: CameraPreview(cameraController!))
+                                          : Center(child: TextButton.icon(icon: const Icon(Icons.camera_alt), label: const Text('Activar Cámara USB'), onPressed: activarCamara)),
                                 ),
                                 if (camaraActiva)
-                                  TextButton(onPressed: tomarFoto, child: const Text('Capturar Foto Nueva', style: TextStyle(color: Colors.green))),
+                                  TextButton(onPressed: tomarFoto, child: const Text('Capturar Foto', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold))),
                               ],
                             ),
                           ),
                           const SizedBox(width: 20),
-                          // Huella
+                          // Sección de Huella
                           Expanded(
                             child: Column(
                               children: [
@@ -456,7 +489,6 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
     );
   }
 
-  // --- LÓGICA DE VENTAS CON CÁLCULO INVERTIDO ---
   Future<void> _venderMembresia(BuildContext context, Map<String, dynamic> cliente) async {
     String boxSede = obtenerNombreBoxSede('inventarioBox');
     if (!Hive.isBoxOpen(boxSede)) await Hive.openBox(boxSede);
@@ -628,7 +660,7 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
                     final idVenta = DateTime.now().millisecondsSinceEpoch.toString();
                     final nuevaVenta = {
                       'id': idVenta,
-                      'concepto': productoSeleccionado != null ? 'Venta: $productoSeleccionado' : 'Membresía',
+                      'concepto': productoSeleccionado != null ? 'Venta: $productoSeleccionado' : 'Membresía (${fechaInicio.day}/${fechaInicio.month} al ${fechaCierre.day}/${fechaCierre.month})',
                       'monto': totalFacturaUsd,
                       'metodoPago': 'MIXTO',
                       'pagosDetalle': desglose,
@@ -698,7 +730,7 @@ class _FichaClienteWidgetState extends State<FichaClienteWidget> {
                               OutlinedButton.icon(
                                 icon: const Icon(Icons.edit, size: 14), 
                                 label: const Text('Editar', style: TextStyle(fontSize: 12)), 
-                                onPressed: () => _editarClienteCompleto(context, cliente), // <-- LLAMA AL NUEVO EDITOR COMPLETO
+                                onPressed: () => _editarClienteCompleto(context, cliente),
                               ),
                             const SizedBox(width: 10),
                             ElevatedButton.icon(
